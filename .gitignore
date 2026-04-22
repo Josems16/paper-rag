@@ -1,0 +1,40 @@
+# ── Runtime data (PDFs, extracted text, embeddings) ──────────────────────────
+# IMPORTANT: Never commit data/ — it contains copies of ingested PDFs (copyright)
+# and potentially sensitive research content.
+data/
+input/
+
+# ── Local Claude Code settings ────────────────────────────────────────────────
+.claude/settings.local.json
+
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+.env
+
+# ── Test / coverage ───────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ── OS ────────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── IDE ───────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp

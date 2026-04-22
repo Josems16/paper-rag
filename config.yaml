@@ -1,0 +1,44 @@
+# PDF RAG Pipeline — Configuration
+# All values are optional; defaults shown below are the built-in ones.
+# Override individual keys as needed. Env vars (PDF_PIPELINE_<KEY>=value)
+# take priority over this file.
+
+# ── Directories ──────────────────────────────────────────────────────────────
+# input_dir: input
+# raw_dir: data/raw
+# processed_dir: data/processed
+# reports_dir: data/reports
+# index_dir: data/index
+
+# ── Extraction ───────────────────────────────────────────────────────────────
+# Minimum characters per page to count as "has text"
+min_chars_per_page: 50
+
+# Fraction of pages below threshold that triggers OCR consideration
+ocr_trigger_ratio: 0.4
+
+# ── Chunking ─────────────────────────────────────────────────────────────────
+chunk_size: 1000        # target characters per chunk
+chunk_overlap: 150      # overlap between consecutive chunks
+min_chunk_size: 100     # chunks smaller than this are discarded
+max_chunk_size: 3000    # chunks larger than this are force-split
+
+# ── Quality thresholds ───────────────────────────────────────────────────────
+garbage_char_threshold: 0.05    # fraction of garbage chars triggering warning
+min_quality_score: 0.5          # below this → REVIEW_RECOMMENDED
+critical_quality_score: 0.25    # below this → FAILED
+
+# ── OCR ──────────────────────────────────────────────────────────────────────
+ocr_enabled: true
+ocr_lang: eng           # tesseract language code(s), e.g. "eng+spa"
+ocr_dpi: 300            # render DPI for OCR (higher = better quality, slower)
+
+# ── Embeddings (optional, requires sentence-transformers) ────────────────────
+embeddings_enabled: true
+# Multilingual model — handles papers in Spanish, English, etc.
+# Swap for all-MiniLM-L6-v2 for English-only + faster first load (~80 MB vs ~470 MB)
+embeddings_model: paraphrase-multilingual-MiniLM-L12-v2
+embeddings_batch_size: 32
+
+# ── Logging ──────────────────────────────────────────────────────────────────
+log_level: INFO         # DEBUG | INFO | WARNING | ERROR
