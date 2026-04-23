@@ -129,6 +129,20 @@ def semantic_search(
     return hits
 
 
+def document_exists(document_id: str, config: Config) -> bool:
+    """Return True if any chunk for this document_id is already indexed."""
+    if not _CHROMA_AVAILABLE:
+        return False
+    collection = _get_collection(config)
+    if collection is None:
+        return False
+    try:
+        result = collection.get(where={"document_id": document_id}, limit=1)
+        return len(result.get("ids", [])) > 0
+    except Exception:
+        return False
+
+
 def delete_document(document_id: str, config: Config) -> int:
     """Remove all chunks for a document. Returns number of chunks removed."""
     if not _CHROMA_AVAILABLE:

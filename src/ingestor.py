@@ -11,13 +11,14 @@ always returns a ProcessingReport describing what happened.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 from pathlib import Path
 from typing import Optional
 
 from .academic_meta import extract_academic_metadata, AcademicMetadata
-from .chromadb_index import add_to_chroma
+from .chromadb_index import add_to_chroma, document_exists
 from .config import Config, load_config
 from .extractor import extract_text
 from .indexer import index_chunks
@@ -31,7 +32,6 @@ from .models import (
     ProcessingStatus,
     QualityStatus,
     ValidationResult,
-    new_document_id,
     now_iso,
 )
 from .normalizer import normalize_text
@@ -64,10 +64,21 @@ def ingest_pdf(
     cfg.ensure_dirs()
 
     path = Path(pdf_path)
-    document_id = new_document_id()
+    # Deterministic ID: same filename always gets the same ID so ChromaDB upsert
+    # de-duplicates correctly when the watcher re-runs on an already-indexed PDF.
+    document_id = hashlib.sha256(path.name.encode()).hexdigest()[:32]
     start_time = time.monotonic()
 
     logger.info("=== Ingesting %s (id=%s) ===", path.name, document_id)
+
+    # Skip if this document is already in the semantic index
+    if document_exists(document_id, cfg):
+        logger.info("Skipping %s — already indexed", path.name)
+        return _finalize(
+            document_id, path.name, ProcessingStatus.COMPLETED,
+            None, None, None, 0, True, True,
+            ["Already indexed — skipped"], [], start_time, cfg, verbose,
+        )
 
     # Accumulate state across stages
     inspection: Optional[InspectionResult] = None
