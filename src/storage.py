@@ -16,8 +16,10 @@ Layout under data/:
 
 from __future__ import annotations
 
+import csv
 import json
 import logging
+import re
 import shutil
 from pathlib import Path
 from typing import Dict, List, Optional, Any
@@ -25,7 +27,6 @@ from typing import Dict, List, Optional, Any
 from .config import Config
 from .image_extractor import ImageRecord
 from .models import Chunk, ExtractionResult, InspectionResult, ProcessingReport, ValidationResult
-from typing import Any  # noqa: F811 – re-import for Optional[Any]
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,111 @@ def save_images(
     return images_dir
 
 
+def save_figures_json(
+    document_id: str,
+    figures: List[Dict[str, Any]],
+    config: Config,
+) -> Path:
+    """
+    Save the enriched figures list to data/processed/<doc_id>/figures.json.
+    This complements the raw images_index.json with caption and linking data.
+    """
+    proc_dir = config.processed_dir / document_id
+    proc_dir.mkdir(parents=True, exist_ok=True)
+    out_path = proc_dir / "figures.json"
+    out_path.write_text(
+        json.dumps(figures, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    logger.info("Saved figures.json (%d figures) → %s", len(figures), out_path)
+    return out_path
+
+
+def save_tables(
+    document_id: str,
+    tables: List[Dict[str, Any]],
+    config: Config,
+) -> Path:
+    """
+    Save tables to data/processed/<doc_id>/tables/.
+
+    Per table: <label_slug>.csv and <label_slug>.json.
+    Registry: data/processed/<doc_id>/tables.json.
+    Paths relative to data_dir are written back into each table dict.
+    """
+    proc_dir = config.processed_dir / document_id
+    tables_dir = proc_dir / "tables"
+    tables_dir.mkdir(parents=True, exist_ok=True)
+
+    for table in tables:
+        table_id = table.get("table_id", str(id(table)))
+        label    = table.get("label") or table_id
+        slug     = _slugify(label)[:20]
+        base     = tables_dir / slug
+
+        # CSV
+        try:
+            csv_path = base.with_suffix(".csv")
+            with open(csv_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                headers = table.get("headers") or []
+                if headers:
+                    writer.writerow(headers)
+                for row in table.get("rows") or []:
+                    writer.writerow([c or "" for c in row])
+            table["csv_path"] = str(csv_path.relative_to(config.data_dir))
+        except Exception as exc:
+            logger.warning("Could not write CSV for table %s: %s", label, exc)
+
+        # JSON (data only, not the full record)
+        try:
+            json_path = base.with_suffix(".json")
+            json_path.write_text(
+                json.dumps(
+                    {"table_id": table_id, "headers": table.get("headers"), "rows": table.get("rows")},
+                    indent=2, ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            table["json_path"] = str(json_path.relative_to(config.data_dir))
+        except Exception as exc:
+            logger.warning("Could not write JSON for table %s: %s", label, exc)
+
+    registry_path = proc_dir / "tables.json"
+    registry_path.write_text(
+        json.dumps(tables, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    logger.info("Saved tables.json (%d tables) → %s", len(tables), registry_path)
+    return registry_path
+
+
+def save_equations(
+    document_id: str,
+    equations: List[Dict[str, Any]],
+    config: Config,
+) -> Path:
+    """
+    Save equation records to data/processed/<doc_id>/equations.json.
+    """
+    proc_dir = config.processed_dir / document_id
+    proc_dir.mkdir(parents=True, exist_ok=True)
+    out_path = proc_dir / "equations.json"
+    out_path.write_text(
+        json.dumps(equations, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    logger.info("Saved equations.json (%d equations) → %s", len(equations), out_path)
+    return out_path
+
+
+def _slugify(text: str) -> str:
+    """Convert 'Table 1: Summary' → 'table_1_summary'."""
+    text = text.lower()
+    text = re.sub(r'[^a-z0-9]+', '_', text)
+    return text.strip('_')
+
+
 def save_artifacts(
     document_id: str,
     source_pdf: Path,
@@ -80,6 +186,8 @@ def save_artifacts(
     config: Config,
     academic_meta: Optional[Any] = None,
     images: Optional[List[ImageRecord]] = None,
+    tables: Optional[List[Dict[str, Any]]] = None,
+    equations: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Path]:
     """
     Persist all pipeline artifacts.  Returns a mapping of artifact name → path.
@@ -163,6 +271,28 @@ def save_artifacts(
             paths["images_dir"] = save_images(document_id, images, config)
         except Exception as exc:
             logger.warning("Image storage failed (non-critical): %s", exc)
+
+    # 7. figures.json — enriched figure metadata (processed dir)
+    if images:
+        try:
+            figures_data = [img.to_dict() for img in images]
+            paths["figures_json"] = save_figures_json(document_id, figures_data, config)
+        except Exception as exc:
+            logger.warning("figures.json write failed (non-critical): %s", exc)
+
+    # 8. Tables (optional)
+    if tables:
+        try:
+            paths["tables_json"] = save_tables(document_id, tables, config)
+        except Exception as exc:
+            logger.warning("Table storage failed (non-critical): %s", exc)
+
+    # 9. Equations (optional)
+    if equations:
+        try:
+            paths["equations_json"] = save_equations(document_id, equations, config)
+        except Exception as exc:
+            logger.warning("Equation storage failed (non-critical): %s", exc)
 
     return paths
 

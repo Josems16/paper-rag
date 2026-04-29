@@ -163,6 +163,12 @@ class Chunk:
     char_count: int = 0
     token_estimate: int = 0
     embedding: Optional[List[float]] = None
+    # --- Enrichment fields (added in v2) ---
+    chunk_type: str = "text"           # "text" | "table" | "figure" | "equation"
+    source_id: Optional[str] = None    # table_id / figure_id / equation_id for specialised chunks
+    linked_figures: List[str] = field(default_factory=list)
+    linked_tables: List[str] = field(default_factory=list)
+    linked_equations: List[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.char_count:
@@ -186,6 +192,11 @@ class Chunk:
             "char_count": self.char_count,
             "token_estimate": self.token_estimate,
             "created_at": self.created_at,
+            "chunk_type": self.chunk_type,
+            "source_id": self.source_id,
+            "linked_figures": self.linked_figures,
+            "linked_tables": self.linked_tables,
+            "linked_equations": self.linked_equations,
         }
         if self.embedding is not None:
             d["embedding"] = list(self.embedding)

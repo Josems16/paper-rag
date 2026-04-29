@@ -5,7 +5,11 @@ data/
 input/
 
 # ── Local Claude Code settings ────────────────────────────────────────────────
+# settings.json may contain absolute paths; keep it out of version control.
+.claude/settings.json
 .claude/settings.local.json
+# .mcp.json contains machine-specific absolute paths — never commit.
+.mcp.json
 
 # ── Python ───────────────────────────────────────────────────────────────────
 __pycache__/
@@ -22,7 +26,12 @@ build/
 .venv/
 venv/
 env/
+
+# ── Environment / secrets ─────────────────────────────────────────────────────
+# All .env files are ignored. Only .env.example (no real keys) is versioned.
 .env
+.env.*
+!.env.example
 
 # ── Test / coverage ───────────────────────────────────────────────────────────
 .pytest_cache/

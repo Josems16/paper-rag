@@ -30,6 +30,7 @@ from src.chromadb_index import (
 )
 from src.config import load_config
 from src.storage import load_chunks, load_report
+import src.rag_service as _rag
 
 # ── Server setup ──────────────────────────────────────────────────────────────
 
@@ -249,6 +250,192 @@ def knowledge_base_stats() -> str:
     lines = ["Knowledge base statistics", "─" * 40]
     for k, v in stats.items():
         lines.append(f"  {k:<22}: {v}")
+    return "\n".join(lines)
+
+
+# ── RAG tools (search + LLM answer, built on rag_service) ────────────────────
+
+@mcp.tool()
+def rag_search(question: str, top_k: int = 5) -> str:
+    """
+    Semantic search over indexed papers. Returns ranked chunks with metadata.
+
+    Does NOT call the LLM — pure retrieval only. Use this to inspect evidence
+    before deciding whether to call rag_answer.
+
+    Args:
+        question: Natural-language question or search query.
+        top_k:    Number of chunks to retrieve (default 5, max 20).
+
+    Returns:
+        Ranked list of chunks with paper, page, section, distance, and a
+        text preview for each result.
+    """
+    top_k = max(1, min(top_k, 20))
+
+    try:
+        hits = _rag.search(question, top_k=top_k, config=_cfg)
+    except RuntimeError as exc:
+        return f"[rag_search] Error: {exc}"
+
+    if not hits:
+        return (
+            f"[rag_search] No se encontraron resultados para: {question!r}\n"
+            "Comprueba que los papers han sido indexados con: "
+            "python cli.py process-folder <carpeta>"
+        )
+
+    sources = _rag._hits_to_sources(hits)
+    lines = [f'[rag_search] "{question}"  (top-{top_k})', "=" * 64]
+
+    for s in sources:
+        key = s["citation_key"] or s["paper_id"] or "?"
+        title = s["title"] or s["paper_id"] or "?"
+        dist = s["distance"]
+        relevance = f"{1 - dist:.3f}" if dist is not None else "?"
+        lines.append(f"\n[{s['rank']}] {key}  —  relevancia: {relevance}")
+        if title and title != key:
+            lines.append(f"    Titulo   : {title}")
+        if s["authors"]:
+            year_str = f"  ({s['year']})" if s["year"] else ""
+            lines.append(f"    Autores  : {s['authors']}{year_str}")
+        page_str = str(s["page"]) if s["page"] is not None else "?"
+        lines.append(f"    Pagina   : {page_str}")
+        if s["section"]:
+            lines.append(f"    Seccion  : {s['section']}")
+        lines.append(f"    Preview  : {s['text_preview']}")
+        lines.append("-" * 64)
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def rag_answer(question: str, top_k: int = 5) -> str:
+    """
+    [OPCIONAL — requiere Anthropic API billing, no Claude Pro]
+
+    Full RAG pipeline: retrieve relevant chunks then generate a grounded answer
+    by calling the Anthropic API directly. This incurs token costs independent
+    of any Claude Pro subscription.
+
+    For most use cases, prefer rag_sources to retrieve evidence and then answer
+    in the conversation using your existing Claude session — no API costs.
+
+    Args:
+        question: The question to answer based on indexed papers.
+        top_k:    Number of chunks to retrieve as context (default 5).
+
+    Returns:
+        LLM-generated answer with in-text citations, followed by a source list.
+        Returns a clear error if ANTHROPIC_API_KEY is missing or the index is empty.
+    """
+    top_k = max(1, min(top_k, 20))
+    result = _rag.answer(question, top_k=top_k, config=_cfg)
+
+    lines = [f'[rag_answer] "{question}"', "=" * 64]
+
+    if result["warning"] and not result["answer"]:
+        lines.append(f"\nAdvertencia: {result['warning']}")
+        return "\n".join(lines)
+
+    if result["warning"]:
+        lines.append(f"Advertencia: {result['warning']}\n")
+
+    lines.append(result["answer"])
+
+    if result["sources"]:
+        lines.append("\n" + "=" * 64)
+        lines.append(f"Fuentes utilizadas ({len(result['sources'])} fragmentos):")
+        for s in result["sources"]:
+            key = s["citation_key"] or s["paper_id"] or "?"
+            page_str = f"  p. {s['page']}" if s["page"] is not None else ""
+            sec_str = f"  §  {s['section']}" if s["section"] else ""
+            lines.append(f"  [{s['rank']}] {key}{page_str}{sec_str}")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def rag_sources(question: str, top_k: int = 5) -> str:
+    """
+    Retrieve and display the evidence sources for a question — without calling
+    the LLM. Use this to inspect what evidence is available before answering.
+
+    Args:
+        question: The question or topic to find sources for.
+        top_k:    Number of sources to retrieve (default 5).
+
+    Returns:
+        Detailed source list: paper, authors, year, page, section, chunk preview.
+    """
+    top_k = max(1, min(top_k, 20))
+
+    try:
+        hits = _rag.search(question, top_k=top_k, config=_cfg)
+    except RuntimeError as exc:
+        return f"[rag_sources] Error: {exc}"
+
+    if not hits:
+        return (
+            f"[rag_sources] No se encontraron fuentes para: {question!r}\n"
+            "Asegurate de que los papers han sido indexados."
+        )
+
+    sources = _rag._hits_to_sources(hits)
+    lines = [f'[rag_sources] Evidencia para: "{question}"', "=" * 64]
+
+    for s in sources:
+        key = s["citation_key"] or s["paper_id"] or "?"
+        lines.append(f"\n[{s['rank']}] {key}")
+        if s["title"]:
+            lines.append(f"    Titulo   : {s['title']}")
+        if s["authors"]:
+            lines.append(f"    Autores  : {s['authors']}")
+        if s["year"]:
+            lines.append(f"    Anio     : {s['year']}")
+        page_str = str(s["page"]) if s["page"] is not None else "?"
+        lines.append(f"    Pagina   : {page_str}")
+        if s["section"]:
+            lines.append(f"    Seccion  : {s['section']}")
+        dist = s["distance"]
+        if dist is not None:
+            lines.append(f"    Distancia: {dist:.4f}  (relevancia: {1-dist:.3f})")
+        if s["chunk_id"]:
+            lines.append(f"    Chunk ID : {s['chunk_id']}")
+        lines.append(f"    Preview  :\n      {s['text_preview']}")
+        lines.append("-" * 64)
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def rag_status() -> str:
+    """
+    Show the current status of the RAG system: index size, embeddings model,
+    ChromaDB path, and whether ANTHROPIC_API_KEY is configured.
+
+    Use this first to verify the system is ready before calling other RAG tools.
+    """
+    st = _rag.status(config=_cfg)
+
+    yes_no = lambda v: "Si" if v else "No"  # noqa: E731
+
+    lines = ["[rag_status]", "=" * 64]
+    lines.append(f"  ChromaDB disponible : {yes_no(st['chroma_available'])}")
+    lines.append(f"  Documentos          : {st['document_count']}")
+    lines.append(f"  Chunks indexados    : {st['total_chunks']}")
+    lines.append(f"  Modelo embeddings   : {st['embeddings_model']}")
+    lines.append(f"  ANTHROPIC_API_KEY   : {'Configurada' if st['anthropic_api_key_set'] else 'NO configurada'}")
+    lines.append(f"  Ruta ChromaDB       : {st['chroma_dir']}")
+    lines.append("=" * 64)
+
+    if st["warnings"]:
+        lines.append("Advertencias:")
+        for w in st["warnings"]:
+            lines.append(f"  - {w}")
+    else:
+        lines.append("Sin advertencias. Sistema listo.")
+
     return "\n".join(lines)
 
 

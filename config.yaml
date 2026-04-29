@@ -40,5 +40,10 @@ embeddings_enabled: true
 embeddings_model: paraphrase-multilingual-MiniLM-L12-v2
 embeddings_batch_size: 32
 
+# ── Structured extraction (v2) ────────────────────────────────────────────────
+# Set to false to skip table or equation extraction (saves processing time).
+extract_tables: true
+extract_equations: true
+
 # ── Logging ──────────────────────────────────────────────────────────────────
 log_level: INFO         # DEBUG | INFO | WARNING | ERROR

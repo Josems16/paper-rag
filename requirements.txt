@@ -29,6 +29,9 @@ sentence-transformers>=2.2.0
 # ── MCP server (Claude Code integration) ─────────────────────────────────────
 mcp>=1.0.0
 
+# ── LLM (Claude / Anthropic SDK) ─────────────────────────────────────────────
+anthropic>=0.40.0
+
 # ── Testing ──────────────────────────────────────────────────────────────────
 pytest>=7.4.0
 pytest-cov>=4.1.0

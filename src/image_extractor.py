@@ -3,8 +3,9 @@ Image extraction from PDFs with figure caption detection.
 
 For each page:
   1. Extract embedded images via PyMuPDF, filter by minimum size.
-  2. Detect nearby text blocks starting with "Fig" / "Figure" as captions.
-  3. Return a list of ImageRecord objects ready for storage.
+  2. Detect nearby text blocks starting with Fig/Figure/Figura as captions.
+  3. Capture surrounding text (non-caption text near the image).
+  4. Return a list of ImageRecord objects ready for storage.
 
 Images without a detected caption are kept but marked accordingly.
 Page-level renders (full-page images in scanned PDFs) are included only
@@ -15,9 +16,10 @@ from __future__ import annotations
 
 import logging
 import re
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import fitz  # PyMuPDF
 
@@ -31,7 +33,19 @@ MIN_HEIGHT_PX = 400
 MIN_AREA_PX = 200_000      # ~450×450 — keeps only real figures
 MIN_FILE_BYTES = 10_000    # skip tiny embedded images
 CAPTION_SEARCH_GAP = 80    # points below/above image to search for caption
-_FIG_RE = re.compile(r"^\s*(fig(?:ure)?\.?\s*\d+)", re.IGNORECASE)
+SURROUND_GAP = 150         # points beyond caption zone to collect surrounding text
+
+# Caption patterns — covers English and Spanish variants:
+#   Fig. 1 / Fig 1 / Figure 1 / Figura 1 / Fig. 1.2
+_FIG_RE = re.compile(
+    r"^\s*(fig(?:ure|ura?)?\.?\s*\d+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+# Label-only extraction (without trailing caption text)
+_FIG_LABEL_RE = re.compile(
+    r"^\s*(fig(?:ura?)?\.?\s*\d+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
 
 
 # ------------------------------------------------------------------
@@ -39,15 +53,34 @@ _FIG_RE = re.compile(r"^\s*(fig(?:ure)?\.?\s*\d+)", re.IGNORECASE)
 # ------------------------------------------------------------------
 @dataclass
 class ImageRecord:
+    figure_id: str            # unique UUID for this figure
     image_index: int          # sequential across whole document
     page: int                 # 1-based
     xref: int                 # PyMuPDF internal reference
     width: int
     height: int
     ext: str                  # "png" / "jpeg" / etc.
-    caption: Optional[str]    # detected figure caption text, or None
+    label: Optional[str]      # "Fig. 3" — just the label token
+    caption: Optional[str]    # full detected figure caption text, or None
     filename: str             # e.g. "p03_img01_Fig3.png"
+    bbox: Optional[Tuple[float, float, float, float]]  # (x0, y0, x1, y1) in pts
+    surrounding_text: Optional[str]   # non-caption text near the figure
     data: bytes = field(repr=False)
+
+    def to_dict(self) -> dict:
+        return {
+            "figure_id": self.figure_id,
+            "image_index": self.image_index,
+            "page": self.page,
+            "filename": self.filename,
+            "width": self.width,
+            "height": self.height,
+            "label": self.label,
+            "caption": self.caption,
+            "bbox": list(self.bbox) if self.bbox else None,
+            "surrounding_text": self.surrounding_text,
+            "mentioned_in_chunks": [],   # filled by linker.py
+        }
 
 
 # ------------------------------------------------------------------
@@ -93,7 +126,7 @@ def _extract_page_images(
     if not raw_images:
         return []
 
-    # Get text blocks with their bounding boxes for caption search
+    # Get text blocks with their bounding boxes for caption/surround search
     text_blocks = page.get_text("blocks")  # list of (x0,y0,x1,y1,text,...)
 
     kept: List[ImageRecord] = []
@@ -111,7 +144,7 @@ def _extract_page_images(
         width = base_image.get("width", 0)
         height = base_image.get("height", 0)
 
-        # Size filter
+        # Size filter — keeps only real figures, drops logos/icons
         if (width < MIN_WIDTH_PX or height < MIN_HEIGHT_PX
                 or width * height < MIN_AREA_PX
                 or len(data) < MIN_FILE_BYTES):
@@ -119,23 +152,31 @@ def _extract_page_images(
 
         # Get bounding box of this image on the page
         img_bbox = _get_image_bbox(page, xref)
+        bbox_tuple = (img_bbox.x0, img_bbox.y0, img_bbox.x1, img_bbox.y1) if img_bbox else None
 
-        # Find caption near the image
-        caption = _find_caption(img_bbox, text_blocks) if img_bbox else None
+        # Find caption and label near the image
+        caption, label = _find_caption_and_label(img_bbox, text_blocks)
+
+        # Get surrounding text (non-caption text nearby)
+        surrounding = _get_surrounding_text(img_bbox, text_blocks, caption)
 
         img_counter += 1
-        slug = _caption_slug(caption)
+        slug = _caption_slug(label)
         filename = f"p{page_num:02d}_img{img_counter:02d}{slug}.{ext}"
 
         kept.append(ImageRecord(
+            figure_id=str(uuid.uuid4()),
             image_index=0,      # filled by caller
             page=page_num,
             xref=xref,
             width=width,
             height=height,
             ext=ext,
+            label=label,
             caption=caption,
             filename=filename,
+            bbox=bbox_tuple,
+            surrounding_text=surrounding,
             data=data,
         ))
 
@@ -153,18 +194,19 @@ def _get_image_bbox(page: fitz.Page, xref: int) -> Optional[fitz.Rect]:
     return None
 
 
-def _find_caption(
-    img_bbox: fitz.Rect,
+def _find_caption_and_label(
+    img_bbox: Optional[fitz.Rect],
     text_blocks: list,
-) -> Optional[str]:
+) -> tuple[Optional[str], Optional[str]]:
     """
-    Look for a text block starting with 'Fig' within CAPTION_SEARCH_GAP
-    points below or above the image bounding box.
+    Look for a text block starting with 'Fig/Figure/Figura' within
+    CAPTION_SEARCH_GAP points below or above the image bounding box.
+
+    Returns (full_caption_text, label_token).
     """
     if img_bbox is None:
-        return None
+        return None, None
 
-    # Search zone: just below the image (primary) then just above (secondary)
     search_below = fitz.Rect(
         img_bbox.x0 - 20, img_bbox.y1,
         img_bbox.x1 + 20, img_bbox.y1 + CAPTION_SEARCH_GAP,
@@ -181,19 +223,60 @@ def _find_caption(
             if not zone.intersects(block_rect):
                 continue
             text = block[4].strip()
-            if _FIG_RE.match(text):
-                # Collapse whitespace in the caption
-                return re.sub(r"\s+", " ", text)
+            m = _FIG_RE.match(text)
+            if m:
+                caption = re.sub(r"\s+", " ", text)
+                label = m.group(1).strip()
+                return caption, label
 
-    return None
+    return None, None
 
 
-def _caption_slug(caption: Optional[str]) -> str:
-    """Turn 'Fig. 3. Market for ceramics AM' → '_Fig3'."""
-    if not caption:
+def _get_surrounding_text(
+    img_bbox: Optional[fitz.Rect],
+    text_blocks: list,
+    caption: Optional[str],
+) -> Optional[str]:
+    """
+    Collect non-caption text blocks within SURROUND_GAP of the image.
+    Returns up to ~400 chars of surrounding context, or None.
+    """
+    if img_bbox is None:
+        return None
+
+    extended = fitz.Rect(
+        img_bbox.x0 - 30, img_bbox.y0 - SURROUND_GAP,
+        img_bbox.x1 + 30, img_bbox.y1 + SURROUND_GAP,
+    )
+
+    parts: List[str] = []
+    caption_norm = re.sub(r"\s+", " ", caption).strip() if caption else ""
+
+    for block in text_blocks:
+        bx0, by0, bx1, by1 = block[0], block[1], block[2], block[3]
+        block_rect = fitz.Rect(bx0, by0, bx1, by1)
+        if not extended.intersects(block_rect):
+            continue
+        text = re.sub(r"\s+", " ", block[4]).strip()
+        if not text:
+            continue
+        # Skip the caption itself
+        if caption_norm and text.startswith(caption_norm[:30]):
+            continue
+        # Skip very short fragments (page numbers, stray chars)
+        if len(text) < 20:
+            continue
+        parts.append(text)
+
+    if not parts:
+        return None
+    combined = " … ".join(parts)
+    return combined[:400] if len(combined) > 400 else combined
+
+
+def _caption_slug(label: Optional[str]) -> str:
+    """Turn 'Fig. 3' → '_Fig3'."""
+    if not label:
         return ""
-    m = _FIG_RE.match(caption)
-    if not m:
-        return ""
-    label = re.sub(r"[^A-Za-z0-9]", "", m.group(1))
-    return f"_{label}"
+    slug = re.sub(r"[^A-Za-z0-9]", "", label)
+    return f"_{slug}" if slug else ""

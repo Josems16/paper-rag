@@ -43,6 +43,13 @@ _AFFILIATION_RE = re.compile(
     r'@[a-z]+\.[a-z]{2,}|corresponding author',
     re.IGNORECASE,
 )
+# Volume: Vol. 12, Volume 12, v.12
+_VOLUME_RE = re.compile(r'\bvol(?:ume)?\.?\s*(\d+)', re.IGNORECASE)
+# Page range: pp. 123-145, p. 123, pages 12–34
+_PAGES_RE = re.compile(
+    r'\bpp?(?:ages?)?\.\s*(\d{1,6}\s*[-–—]\s*\d{1,6})',
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -53,8 +60,12 @@ class AcademicMetadata:
     doi: Optional[str] = None
     abstract: Optional[str] = None
     journal: Optional[str] = None
+    volume: Optional[str] = None           # e.g. "12"
+    pages: Optional[str] = None            # e.g. "123-145"
     keywords: Optional[str] = None
     citation_key: Optional[str] = None     # e.g. "Smith2023"
+    source_file: Optional[str] = None      # original PDF filename
+    paper_id: Optional[str] = None         # document_id from pipeline
 
     def to_dict(self) -> dict:
         return {
@@ -64,8 +75,12 @@ class AcademicMetadata:
             "doi": self.doi,
             "abstract": self.abstract,
             "journal": self.journal,
+            "volume": self.volume,
+            "pages": self.pages,
             "keywords": self.keywords,
             "citation_key": self.citation_key,
+            "source_file": self.source_file,
+            "paper_id": self.paper_id,
         }
 
     def format_citation(self) -> str:
@@ -86,13 +101,25 @@ class AcademicMetadata:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def extract_academic_metadata(pdf_path: str | Path) -> AcademicMetadata:
+def extract_academic_metadata(
+    pdf_path: str | Path,
+    source_file: Optional[str] = None,
+    paper_id: Optional[str] = None,
+) -> AcademicMetadata:
     """
     Extract academic metadata from the first pages of a PDF.
     Returns best-effort results; fields may be None if not found.
+
+    Args:
+        pdf_path:    Path to the PDF file.
+        source_file: Original filename to store in metadata (optional).
+        paper_id:    Pipeline document_id to store in metadata (optional).
     """
     path = Path(pdf_path)
-    meta = AcademicMetadata()
+    meta = AcademicMetadata(
+        source_file=source_file or path.name,
+        paper_id=paper_id,
+    )
 
     try:
         doc = fitz.open(str(path))
@@ -116,6 +143,8 @@ def extract_academic_metadata(pdf_path: str | Path) -> AcademicMetadata:
         meta.abstract = _extract_abstract(combined)
         meta.authors = _extract_authors(pages_text[0], meta.title)
         meta.keywords = _extract_keywords(combined)
+        meta.volume = _extract_volume(combined)
+        meta.pages = _extract_page_range(combined)
         meta.citation_key = _make_citation_key(meta.authors, meta.year, meta.title)
 
     finally:
@@ -304,6 +333,23 @@ def _clean_abstract(text: str) -> Optional[str]:
     if len(text) < 30:
         return None
     return text[:2000]
+
+
+def _extract_volume(text: str) -> Optional[str]:
+    """Return the journal volume number if found."""
+    m = _VOLUME_RE.search(text)
+    return m.group(1) if m else None
+
+
+def _extract_page_range(text: str) -> Optional[str]:
+    """Return the article page range (e.g. '123-145') if found."""
+    m = _PAGES_RE.search(text)
+    if not m:
+        return None
+    # Normalise en-dash / em-dash to hyphen
+    raw = re.sub(r'[–—]', '-', m.group(1))
+    raw = re.sub(r'\s+', '', raw)  # remove spaces around dash
+    return raw
 
 
 def _make_citation_key(authors: Optional[str], year: Optional[str], title: Optional[str]) -> str:

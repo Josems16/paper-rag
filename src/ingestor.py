@@ -35,8 +35,11 @@ from .models import (
     now_iso,
 )
 from .normalizer import normalize_text
-from .chunker import chunk_text
+from .chunker import chunk_text, build_specialized_chunks
 from .image_extractor import extract_images
+from .table_extractor import extract_tables
+from .equation_extractor import extract_equations
+from .linker import link_chunks_to_elements
 from .reporter import build_report, print_report
 from .storage import StorageError, save_artifacts, save_report
 from .validator import validate_extraction
@@ -93,6 +96,8 @@ def ingest_pdf(
     extra_warnings: list = []
     extra_errors: list = []
     final_status = ProcessingStatus.RECEIVED
+    tables: list = []
+    equations: list = []
 
     # -----------------------------------------------------------------------
     # Stage 1: INSPECTING
@@ -255,7 +260,11 @@ def ingest_pdf(
     if cfg.extract_academic_metadata:
         logger.info("[%s] Extracting academic metadata…", path.name)
         try:
-            academic_meta = extract_academic_metadata(path)
+            academic_meta = extract_academic_metadata(
+                path,
+                source_file=path.name,
+                paper_id=document_id,
+            )
             if academic_meta.title:
                 logger.info(
                     "[%s] Title detected: %s", path.name, academic_meta.title[:80]
@@ -283,6 +292,77 @@ def ingest_pdf(
         logger.warning("Image extraction failed (non-critical): %s", exc)
 
     # -----------------------------------------------------------------------
+    # Stage 5d: TABLE EXTRACTION
+    # -----------------------------------------------------------------------
+    if cfg.extract_tables:
+        logger.info("[%s] Extracting tables…", path.name)
+        try:
+            table_records = extract_tables(path, paper_id=document_id)
+            tables = [t.to_dict() for t in table_records]
+            if tables:
+                captioned_tabs = sum(1 for t in tables if t.get("caption"))
+                logger.info(
+                    "[%s] %d table(s) found (%d with caption)",
+                    path.name, len(tables), captioned_tabs,
+                )
+        except Exception as exc:
+            logger.warning("Table extraction failed (non-critical): %s", exc)
+            tables = []
+
+    # -----------------------------------------------------------------------
+    # Stage 5e: EQUATION DETECTION
+    # -----------------------------------------------------------------------
+    if cfg.extract_equations and extraction.raw_text_by_page:
+        logger.info("[%s] Detecting equations…", path.name)
+        try:
+            eq_records = extract_equations(
+                extraction.raw_text_by_page,
+                paper_id=document_id,
+            )
+            equations = [e.to_dict() for e in eq_records]
+            if equations:
+                logger.info("[%s] %d equation(s) detected", path.name, len(equations))
+        except Exception as exc:
+            logger.warning("Equation detection failed (non-critical): %s", exc)
+            equations = []
+
+    # -----------------------------------------------------------------------
+    # Stage 5f: SPECIALISED CHUNKS + LINKING
+    # -----------------------------------------------------------------------
+    figures_data = [img.to_dict() for img in images] if images else []
+    try:
+        specialised = build_specialized_chunks(
+            tables=tables,
+            figures=figures_data,
+            equations=equations,
+            document_id=document_id,
+            source_file=path.name,
+            config=cfg,
+        )
+        if specialised:
+            logger.info(
+                "[%s] %d specialised chunks built (tables/figures/equations)",
+                path.name, len(specialised),
+            )
+        # Re-index all specialised chunks after text chunks
+        offset = len(chunks)
+        for i, sc in enumerate(specialised):
+            sc.chunk_index = offset + i
+        chunks = chunks + specialised
+    except Exception as exc:
+        logger.warning("Specialised chunk build failed (non-critical): %s", exc)
+
+    try:
+        link_chunks_to_elements(
+            chunks=chunks,
+            figures=figures_data,
+            tables=tables,
+            equations=equations,
+        )
+    except Exception as exc:
+        logger.warning("Linking failed (non-critical): %s", exc)
+
+    # -----------------------------------------------------------------------
     # Stage 6: STORING
     # -----------------------------------------------------------------------
     final_status = ProcessingStatus.STORING
@@ -299,6 +379,8 @@ def ingest_pdf(
             validation=validation,
             academic_meta=academic_meta,
             images=images or None,
+            tables=tables or None,
+            equations=equations or None,
             config=cfg,
         )
         stored_ok = True

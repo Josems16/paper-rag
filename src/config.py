@@ -62,6 +62,10 @@ class Config:
     # --- Academic metadata ---
     extract_academic_metadata: bool = True
 
+    # --- Structured extraction (v2) ---
+    extract_tables: bool = True      # use pdfplumber to detect tables
+    extract_equations: bool = True   # heuristic equation detection from text
+
     # --- Logging ---
     log_level: str = "INFO"
 

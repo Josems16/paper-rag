@@ -14,7 +14,7 @@ from __future__ import annotations
 import re
 import uuid
 from datetime import datetime, timezone
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from .config import Config
 from .models import Chunk, ExtractionMethod
@@ -300,6 +300,141 @@ def _build_page_offsets(normalized_pages: List[str], full_text: str = "") -> Lis
 def _normalize_ws(text: str) -> str:
     """Collapse all whitespace runs to a single space for fuzzy matching."""
     return re.sub(r"\s+", " ", text).strip()
+
+
+# ---------------------------------------------------------------------------
+# Specialised chunk builders (tables, figures, equations)
+# ---------------------------------------------------------------------------
+
+def build_specialized_chunks(
+    tables: List[Dict[str, Any]],
+    figures: List[Dict[str, Any]],
+    equations: List[Dict[str, Any]],
+    document_id: str,
+    source_file: str,
+    config: Optional[Config] = None,
+) -> List[Chunk]:
+    """
+    Build one indexable Chunk per table, figure, and equation.
+
+    These chunks complement regular text chunks in ChromaDB so that
+    semantic search can surface structured content alongside prose.
+    """
+    cfg = config or Config()
+    now = datetime.now(timezone.utc).isoformat()
+    chunks: List[Chunk] = []
+    idx = 0
+
+    for table in tables:
+        text = _format_table_chunk(table, source_file)
+        if len(text) < cfg.min_chunk_size:
+            continue
+        chunks.append(Chunk(
+            chunk_id=str(uuid.uuid4()),
+            document_id=document_id,
+            source_file=source_file,
+            text=text,
+            page_start=table.get("page", 1),
+            page_end=table.get("page", 1),
+            chunk_index=idx,
+            section_title=table.get("label"),
+            extraction_method="table_extractor",
+            quality_score=1.0,
+            processing_status="chunked",
+            created_at=now,
+            chunk_type="table",
+            source_id=table.get("table_id"),
+        ))
+        idx += 1
+
+    for fig in figures:
+        text = _format_figure_chunk(fig, source_file)
+        if len(text) < cfg.min_chunk_size:
+            continue
+        chunks.append(Chunk(
+            chunk_id=str(uuid.uuid4()),
+            document_id=document_id,
+            source_file=source_file,
+            text=text,
+            page_start=fig.get("page", 1),
+            page_end=fig.get("page", 1),
+            chunk_index=idx,
+            section_title=fig.get("label"),
+            extraction_method="image_extractor",
+            quality_score=1.0,
+            processing_status="chunked",
+            created_at=now,
+            chunk_type="figure",
+            source_id=fig.get("figure_id"),
+        ))
+        idx += 1
+
+    for eq in equations:
+        text = _format_equation_chunk(eq, source_file)
+        if len(text) < cfg.min_chunk_size:
+            continue
+        chunks.append(Chunk(
+            chunk_id=str(uuid.uuid4()),
+            document_id=document_id,
+            source_file=source_file,
+            text=text,
+            page_start=eq.get("page", 1),
+            page_end=eq.get("page", 1),
+            chunk_index=idx,
+            section_title=eq.get("label"),
+            extraction_method="equation_extractor",
+            quality_score=0.9,
+            processing_status="chunked",
+            created_at=now,
+            chunk_type="equation",
+            source_id=eq.get("equation_id"),
+        ))
+        idx += 1
+
+    return chunks
+
+
+def _format_table_chunk(table: Dict[str, Any], source_file: str) -> str:
+    label   = table.get("label") or "Table"
+    page    = table.get("page", "?")
+    caption = table.get("caption") or ""
+    md      = table.get("markdown") or ""
+    lines = [f"[{label}]", f"Paper: {source_file}", f"Page: {page}"]
+    if caption and caption != label:
+        lines.append(f"Caption: {caption}")
+    if md:
+        lines.append("Markdown:")
+        lines.append(md)
+    return "\n".join(lines)
+
+
+def _format_figure_chunk(fig: Dict[str, Any], source_file: str) -> str:
+    label   = fig.get("label") or "Figure"
+    page    = fig.get("page", "?")
+    caption = fig.get("caption") or ""
+    surr    = fig.get("surrounding_text") or ""
+    lines = [f"[{label}]", f"Paper: {source_file}", f"Page: {page}"]
+    if caption:
+        lines.append(f"Caption: {caption}")
+    if surr:
+        lines.append("Related text:")
+        lines.append(surr)
+    return "\n".join(lines)
+
+
+def _format_equation_chunk(eq: Dict[str, Any], source_file: str) -> str:
+    label = eq.get("label") or "Equation"
+    page  = eq.get("page", "?")
+    text  = eq.get("text") or ""
+    surr  = eq.get("surrounding_text") or ""
+    lines = [f"[{label}]", f"Paper: {source_file}", f"Page: {page}"]
+    if text:
+        lines.append("Equation:")
+        lines.append(text)
+    if surr:
+        lines.append("Related text:")
+        lines.append(surr)
+    return "\n".join(lines)
 
 
 def _estimate_page_range(
